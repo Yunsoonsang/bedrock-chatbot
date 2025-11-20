@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>삼화페인트 AI 챗봇</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 900px;
+            height: 90vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+
+        .user-info {
+            background: #f8f9fa;
+            padding: 15px 30px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .user-info-row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+
+        .user-info-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .user-info input, .user-info select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            flex: 1;
+            min-width: 150px;
+        }
+
+        .kb-info {
+            background: #e8f4f8;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .kb-info-title {
+            font-weight: bold;
+            font-size: 13px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+
+        .kb-domains {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .kb-domain-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            background: white;
+            border: 1px solid #667eea;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #667eea;
+        }
+
+        .kb-domain-badge.has-data {
+            background: #667eea;
+            color: white;
+        }
+
+        .kb-domain-badge.no-data {
+            background: #f0f0f0;
+            color: #999;
+            border-color: #ddd;
+        }
+
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 30px;
+            background: #fafafa;
+            min-height: 0; /* flexbox에서 스크롤을 위해 필요 */
+        }
+
+        .message {
+            margin-bottom: 20px;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            text-align: right;
+        }
+
+        .message.bot {
+            text-align: left;
+        }
+
+        .message-content {
+            display: inline-block;
+            max-width: 70%;
+            padding: 12px 18px;
+            border-radius: 18px;
+            word-wrap: break-word;
+            line-height: 1.5;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .message.bot .message-content pre {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 10px 0;
+            font-size: 13px;
+        }
+
+        .message.bot .message-content ul, .message.bot .message-content ol {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+
+        .message.bot .message-content li {
+            margin: 5px 0;
+        }
+
+        .metadata {
+            font-size: 12px;
+            color: #666;
+            margin-top: 10px;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .metadata:hover {
+            background: #e0e0e0;
+        }
+
+        .metadata-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .metadata-title::after {
+            content: '▼';
+            font-size: 10px;
+            transition: transform 0.2s;
+        }
+
+        .metadata.expanded .metadata-title::after {
+            transform: rotate(180deg);
+        }
+
+        .metadata-item {
+            margin: 5px 0;
+            padding-left: 10px;
+        }
+
+        .metadata-list {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+            margin-top: 8px;
+        }
+
+        .metadata.expanded .metadata-list {
+            max-height: 500px;
+        }
+
+        .metadata-document {
+            padding: 6px 10px;
+            margin: 4px 0;
+            background: white;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+            font-size: 11px;
+        }
+
+        .metadata-document-title {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .input-area {
+            padding: 20px 30px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-container input {
+            flex: 1;
+            padding: 12px 18px;
+            border: 2px solid #e0e0e0;
+            border-radius: 25px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .input-container input:focus {
+            border-color: #667eea;
+        }
+
+        .input-container button {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .input-container button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .input-container button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(102, 126, 234, 0.3);
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+
+        .timestamp {
+            font-size: 11px;
+            color: #999;
+            margin-top: 5px;
+        }
+
+        .reset-button {
+            padding: 8px 16px;
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s, transform 0.2s;
+            margin-left: auto;
+        }
+
+        .reset-button:hover {
+            background: #5a6268;
+            transform: translateY(-1px);
+        }
+
+        .user-info-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="user-info">
+            <div class="user-info-header">
+                <div class="user-info-row" style="margin-bottom: 0;">
+                    <input type="text" id="userName" placeholder="사용자 이름" value="홍길동">
+                    <input type="text" id="department" placeholder="부서명" value="영업1팀">
+                    <select id="groupCode" onchange="onGroupCodeChange()">
+                        <option value="G1">G1 - 전체 접근</option>
+                        <option value="G2">G2 - 사내 내규만</option>
+                        <option value="G3">G3 - 품질 및 기술 문서</option>
+                        <option value="G4">G4 - 사내 내규 및 법규</option>
+                    </select>
+                </div>
+                <button class="reset-button" onclick="resetChat()" title="대화 내용 초기화">🔄 새로고침</button>
+            </div>
+            <div class="kb-info" id="kbInfo">
+                <div class="kb-info-title">📚 접근 가능한 Knowledge Base Domain:</div>
+                <div class="kb-domains" id="kbDomains">
+                    <span class="kb-domain-badge">로딩 중...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-area" id="chatArea">
+            <div class="message bot">
+                <div class="message-content">
+                    안녕하세요! 삼화페인트 AI 챗봇입니다. 😊<br>
+                    사내 문서, 규정, 기술 자료에 대해 궁금한 점을 물어보세요.
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-container">
+                <input 
+                    type="text" 
+                    id="messageInput" 
+                    placeholder="메시지를 입력하세요..."
+                    onkeypress="handleKeyPress(event)"
+                >
+                <button id="sendButton" onclick="sendMessage()">전송</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let conversationId = null;
+        let currentEventSource = null;
+        let currentGroupCode = 'G1';
+
+        // HTML 이스케이프 함수
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 대화 리셋 함수
+        function resetChat() {
+            if (confirm('대화 내용을 초기화하시겠습니까?')) {
+                // conversation_id 리셋
+                conversationId = null;
+                
+                // 진행 중인 스트림 종료
+                if (currentEventSource) {
+                    currentEventSource.close();
+                    currentEventSource = null;
+                }
+                
+                // 대화 영역 초기화
+                const chatArea = document.getElementById('chatArea');
+                chatArea.innerHTML = `
+                    <div class="message bot">
+                        <div class="message-content">
+                            안녕하세요! 삼화페인트 AI 챗봇입니다. 😊<br>
+                            사내 문서, 규정, 기술 자료에 대해 궁금한 점을 물어보세요.
+                        </div>
+                    </div>
+                `;
+                
+                // 입력 필드 초기화
+                document.getElementById('messageInput').value = '';
+                document.getElementById('sendButton').disabled = false;
+                document.getElementById('sendButton').textContent = '전송';
+            }
+        }
+
+        // 페이지 로드 시 KB 정보 로드
+        window.addEventListener('DOMContentLoaded', () => {
+            loadKBInfo('G1');
+        });
+
+        // Group Code 변경 시 KB 정보 업데이트
+        async function onGroupCodeChange() {
+            const groupCode = document.getElementById('groupCode').value;
+            currentGroupCode = groupCode;
+            await loadKBInfo(groupCode);
+        }
+
+        // KB 정보 로드
+        async function loadKBInfo(groupCode) {
+            try {
+                const response = await fetch(`/chat/group-code/${groupCode}/kb-domains`);
+                if (!response.ok) {
+                    throw new Error('KB 정보를 불러올 수 없습니다.');
+                }
+                
+                const data = await response.json();
+                const kbDomainsDiv = document.getElementById('kbDomains');
+                
+                if (data.kb_domains && data.kb_domains.length > 0) {
+                    kbDomainsDiv.innerHTML = data.kb_domains.map(kb => {
+                        const badgeClass = kb.has_data ? 'has-data' : 'no-data';
+                        const statusIcon = kb.has_data ? '✅' : '⚠️';
+                        return `<span class="kb-domain-badge ${badgeClass}" title="${kb.description}">${statusIcon} ${kb.code}: ${kb.name}</span>`;
+                    }).join('');
+                } else {
+                    kbDomainsDiv.innerHTML = '<span class="kb-domain-badge no-data">접근 가능한 KB Domain이 없습니다.</span>';
+                }
+            } catch (error) {
+                console.error('KB 정보 로드 오류:', error);
+                document.getElementById('kbDomains').innerHTML = '<span class="kb-domain-badge no-data">정보를 불러올 수 없습니다.</span>';
+            }
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        function addMessage(content, isUser = false, metadata = null) {
+            const chatArea = document.getElementById('chatArea');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isUser ? 'user' : 'bot'}`;
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            // 마크다운 스타일 간단 변환
+            let formattedContent = content
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+            
+            contentDiv.innerHTML = formattedContent;
+            
+            if (metadata) {
+                const metadataDiv = document.createElement('div');
+                metadataDiv.className = 'metadata';
+                metadataDiv.innerHTML = `
+                    <div class="metadata-title">📚 참조 문서 정보</div>
+                    <div class="metadata-item">인용: ${metadata.citations?.length || 0}개</div>
+                `;
+                contentDiv.appendChild(metadataDiv);
+            }
+            
+            const timestamp = document.createElement('div');
+            timestamp.className = 'timestamp';
+            timestamp.textContent = new Date().toLocaleTimeString('ko-KR');
+            contentDiv.appendChild(timestamp);
+            
+            messageDiv.appendChild(contentDiv);
+            chatArea.appendChild(messageDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendButton');
+            const message = messageInput.value.trim();
+
+            if (!message) return;
+
+            // 사용자 메시지 표시
+            addMessage(message, true);
+            messageInput.value = '';
+            sendButton.disabled = true;
+            sendButton.innerHTML = '<div class="loading"></div>';
+
+            // 이전 연결 종료
+            if (currentEventSource) {
+                currentEventSource.close();
+            }
+
+            // 사용자 정보 가져오기
+            const userName = document.getElementById('userName').value || '사용자';
+            const department = document.getElementById('department').value || '';
+            const groupCode = currentGroupCode || document.getElementById('groupCode').value || 'G1';
+
+            // 요청 데이터
+            const requestData = {
+                message: message,
+                conversation_id: conversationId,
+                group_code: groupCode,
+                user_name: userName,
+                department: department
+            };
+
+            // POST 요청으로 SSE 스트리밍 시작
+            let fullText = '';
+            let metadata = null;
+            let messageDiv = null;
+
+            fetch('/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(requestData)
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                function readStream() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) {
+                            sendButton.disabled = false;
+                            sendButton.textContent = '전송';
+                            // 메타데이터는 metadata 이벤트에서 이미 표시되므로 여기서는 추가하지 않음
+                            return;
+                        }
+
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+
+                        let currentEvent = null;
+                        let currentData = '';
+
+                        for (const line of lines) {
+                            if (line.startsWith('event: ')) {
+                                currentEvent = line.substring(7).trim();
+                                continue;
+                            }
+                            
+                            if (line.startsWith('data: ')) {
+                                currentData += line.substring(6) + '\n';
+                                continue;
+                            }
+                            
+                            if (line.trim() === '' && currentData) {
+                                // 빈 줄 = 이벤트 완료
+                                const dataStr = currentData.trim();
+                                if (dataStr) {
+                                    try {
+                                        const data = JSON.parse(dataStr);
+                                        
+                                        if (currentEvent === 'start' && data.conversation_id) {
+                                            conversationId = data.conversation_id;
+                                        }
+                                        
+                                        if (currentEvent === 'token' && data.token) {
+                                            fullText += data.token;
+                                            
+                                            // 봇 메시지 생성 또는 업데이트
+                                            const chatArea = document.getElementById('chatArea');
+                                            
+                                            if (!messageDiv) {
+                                                messageDiv = document.createElement('div');
+                                                messageDiv.className = 'message bot';
+                                                const contentDiv = document.createElement('div');
+                                                contentDiv.className = 'message-content';
+                                                messageDiv.appendChild(contentDiv);
+                                                chatArea.appendChild(messageDiv);
+                                            }
+                                            
+                                            const contentDiv = messageDiv.querySelector('.message-content');
+                                            let formattedText = fullText
+                                                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                                                .replace(/\n/g, '<br>');
+                                            contentDiv.innerHTML = formattedText;
+                                            
+                                            chatArea.scrollTop = chatArea.scrollHeight;
+                                        }
+                                        
+                                        if (currentEvent === 'metadata') {
+                                            metadata = data;
+                                            
+                                            // 메타데이터가 도착하면 즉시 표시
+                                            if (metadata && messageDiv && metadata.citations && metadata.citations.length > 0) {
+                                                const contentDiv = messageDiv.querySelector('.message-content');
+                                                // 기존 메타데이터 제거 (중복 방지)
+                                                const existingMetadata = contentDiv.querySelector('.metadata');
+                                                if (existingMetadata) {
+                                                    existingMetadata.remove();
+                                                }
+                                                
+                                                const metadataDiv = document.createElement('div');
+                                                metadataDiv.className = 'metadata';
+                                                
+                                                // 문서 목록 HTML 생성
+                                                const documentsHtml = metadata.citations.map((citation, index) => {
+                                                    const title = citation.title || citation.s3_uri || `문서 ${index + 1}`;
+                                                    return `<div class="metadata-document">
+                                                        <div class="metadata-document-title">${index + 1}. ${escapeHtml(title)}</div>
+                                                    </div>`;
+                                                }).join('');
+                                                
+                                                metadataDiv.innerHTML = `
+                                                    <div class="metadata-title">📚 참조 문서 정보</div>
+                                                    <div class="metadata-item">인용: ${metadata.citations.length}개</div>
+                                                    <div class="metadata-list">
+                                                        ${documentsHtml}
+                                                    </div>
+                                                `;
+                                                
+                                                // 클릭 이벤트 추가
+                                                metadataDiv.addEventListener('click', function() {
+                                                    this.classList.toggle('expanded');
+                                                });
+                                                
+                                                contentDiv.appendChild(metadataDiv);
+                                                chatArea.scrollTop = chatArea.scrollHeight;
+                                            }
+                                        }
+                                        
+                                        if (currentEvent === 'done') {
+                                            // 완료 처리
+                                        }
+                                        
+                                        if (currentEvent === 'error') {
+                                            addMessage(`오류가 발생했습니다: ${data.message || data.error?.message || '알 수 없는 오류'}`, false);
+                                            sendButton.disabled = false;
+                                            sendButton.textContent = '전송';
+                                            return;
+                                        }
+                                    } catch (e) {
+                                        console.error('JSON parse error:', e, dataStr);
+                                    }
+                                }
+                                currentEvent = null;
+                                currentData = '';
+                            }
+                        }
+
+                        readStream();
+                    }).catch(error => {
+                        console.error('Stream read error:', error);
+                        addMessage('스트리밍 오류가 발생했습니다.', false);
+                        sendButton.disabled = false;
+                        sendButton.textContent = '전송';
+                    });
+                }
+
+                readStream();
+            })
+            .catch(error => {
+                console.error('Fetch error:', error);
+                addMessage('연결 오류가 발생했습니다.', false);
+                sendButton.disabled = false;
+                sendButton.textContent = '전송';
+            });
+        }
+    </script>
+</body>
+</html>
+
