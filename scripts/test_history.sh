@@ -1,0 +1,66 @@
+#!/bin/bash
+# History API 테스트 스크립트
+# Amazon Linux 2023 환경에서 실행
+
+set -e
+
+# 기본 설정
+BASE_URL="${BASE_URL:-http://localhost:8000}"
+API_URL="${BASE_URL}/history"
+
+# 홍길동 유저 정보
+CORP_ID="SH001"
+EMPLOYEE_ID="hong123"
+USER_NAME="홍길동"
+DEPARTMENT="인사팀"
+
+echo "=========================================="
+echo "5. GET /history 테스트"
+echo "=========================================="
+echo "API URL: ${API_URL}"
+echo "사용자: ${USER_NAME} (${EMPLOYEE_ID})"
+echo ""
+
+# History 조회 요청
+response=$(curl -s -w "\n%{http_code}" \
+  -X GET \
+  -H "X-Corp-Id: ${CORP_ID}" \
+  -H "X-Employee-Id: ${EMPLOYEE_ID}" \
+  -H "X-User-Name: ${USER_NAME}" \
+  -H "X-Department: ${DEPARTMENT}" \
+  "${API_URL}")
+
+http_code=$(echo "${response}" | tail -n1)
+body=$(echo "${response}" | sed '$d')
+
+echo "HTTP Status Code: ${http_code}"
+echo "Response Body:"
+echo "${body}" | jq '.' 2>/dev/null || echo "${body}"
+echo ""
+
+# 결과 확인
+if [ "${http_code}" -eq 200 ]; then
+    echo "✅ History 조회 성공"
+    
+    # 대화 개수 확인
+    total=$(echo "${body}" | jq '.total' 2>/dev/null || echo "0")
+    count=$(echo "${body}" | jq '.conversations | length' 2>/dev/null || echo "0")
+    
+    echo "   전체 대화 수: ${total}"
+    echo "   현재 페이지 대화 수: ${count}"
+    
+    # 대화 목록 간단히 출력
+    if command -v jq &> /dev/null && [ "${count}" -gt 0 ]; then
+        echo ""
+        echo "대화 목록:"
+        echo "${body}" | jq -r '.conversations[] | "  - \(.title) (ID: \(.conversation_id))"' 2>/dev/null || true
+    fi
+    
+    exit 0
+else
+    echo "❌ History 조회 실패 (HTTP ${http_code})"
+    echo "Response: ${body}"
+    exit 1
+fi
+
+

@@ -84,3 +84,6 @@ env.txt
 request.txt
 response.txt
 cursor.txt
+VALIDATION_REPORT.md
+API_REVIEW_REPORT.md
+INTEGRATION_TEST_GUIDE.md

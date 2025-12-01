@@ -7,20 +7,34 @@ import json
 from typing import AsyncIterator, Dict, Any, Optional, List, Tuple
 from urllib.parse import urlparse
 from app.config import settings
-from app.config.mock_data import MOCK_GROUP_CODES, MOCK_KB_DOMAINS
+from app.database import get_pool
+# Mock 데이터는 로컬 테스트용으로만 사용 (use_mock_data=True일 때만 활성화)
+# 실제 운영 환경에서는 데이터베이스에서 데이터를 가져옵니다
+if settings.use_mock_data:
+    from app.config.mock_data import MOCK_GROUP_CODES, MOCK_KB_DOMAINS
+else:
+    # Mock 데이터 비활성화 시 빈 딕셔너리 사용
+    MOCK_GROUP_CODES = {}
+    MOCK_KB_DOMAINS = {}
 
 
 class BedrockService:
     """Bedrock Knowledge Base 서비스"""
     
     def __init__(self):
-        """Bedrock 클라이언트 초기화"""
+        """Bedrock 클라이언트 초기화
+        
+        자격증명 처리:
+        - 환경 변수에 자격증명이 있으면 (로컬 개발) → 명시적으로 전달
+        - 환경 변수에 자격증명이 없으면 (EC2 IAM 역할) → boto3가 자동으로 IAM 역할 사용
+        """
         client_kwargs = {
             "service_name": "bedrock-agent-runtime",
             "region_name": settings.aws_region,
         }
         
-        # 환경 변수에 자격증명이 있으면 사용
+        # 환경 변수에 자격증명이 있으면 사용 (로컬 개발용)
+        # 없으면 boto3가 자동으로 자격증명 체인을 사용 (EC2 IAM 역할 포함)
         if settings.aws_access_key_id and settings.aws_secret_access_key:
             client_kwargs["aws_access_key_id"] = settings.aws_access_key_id
             client_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
@@ -60,7 +74,7 @@ class BedrockService:
         Args:
             query: 사용자 쿼리
             conversation_id: 대화 ID (선택)
-            group_code: 그룹 코드 (선택, G1-G4)
+            group_code: 그룹 코드 (선택, 예: GRP_IN_ALL, GRP_QLT_QM_RP, GRP_TS_ALL)
             user_name: 사용자 이름 (선택, 프롬프트에 활용)
             department: 부서명 (선택, 프롬프트에 활용)
         
@@ -69,7 +83,7 @@ class BedrockService:
         """
         try:
             # 1단계: Retrieve - 검색만 수행
-            allowed_s3_paths = self._get_allowed_s3_paths(group_code)
+            allowed_s3_paths = await self._get_allowed_s3_paths(group_code)
             
             retrieve_params = {
                 "knowledgeBaseId": self.knowledge_base_id,
@@ -93,7 +107,7 @@ class BedrockService:
             retrieval_results = retrieve_response.get("retrievalResults", [])
             
             # 2단계: 필터링 및 권한 체크
-            filter_result = self._filter_retrieval_results(retrieval_results, allowed_s3_paths)
+            filter_result = await self._filter_retrieval_results(retrieval_results, allowed_s3_paths)
             filtered_results = filter_result["allowed"]
             blocked_domains = filter_result["blocked_domains"]
             has_permission_violation = filter_result["has_permission_violation"]
@@ -102,7 +116,7 @@ class BedrockService:
             if not filtered_results:
                 # 원본 검색 결과가 있었지만 모두 필터링된 경우
                 if retrieval_results:
-                    permission_msg = self._generate_permission_message(blocked_domains, group_code)
+                    permission_msg = await self._generate_permission_message(blocked_domains, group_code)
                     yield {
                         "text": f"죄송합니다. 문의하신 내용은 현재 계정으로 접근할 수 없는 영역입니다.{permission_msg}",
                         "citations": [],
@@ -165,10 +179,10 @@ class BedrockService:
             # 권한 제한 메시지 (필요시)
             permission_note = ""
             if has_permission_violation:
-                permission_note = self._generate_permission_message(blocked_domains, group_code)
+                permission_note = await self._generate_permission_message(blocked_domains, group_code)
             
             # 프롬프트 구성
-            prompt = self._build_filtered_prompt(
+            prompt = await self._build_filtered_prompt(
                 query=query,
                 context=context,
                 user_name=user_name,
@@ -219,12 +233,16 @@ class BedrockService:
         """
         try:
             # Bedrock Runtime 클라이언트 생성 (invoke_model용)
-            runtime_client = boto3.client(
-                "bedrock-runtime",
-                region_name=settings.aws_region,
-                aws_access_key_id=settings.aws_access_key_id if settings.aws_access_key_id else None,
-                aws_secret_access_key=settings.aws_secret_access_key if settings.aws_secret_access_key else None
-            )
+            # 자격증명이 있으면 명시적으로 전달, 없으면 boto3가 자동으로 IAM 역할 사용
+            runtime_kwargs = {
+                "service_name": "bedrock-runtime",
+                "region_name": settings.aws_region,
+            }
+            if settings.aws_access_key_id and settings.aws_secret_access_key:
+                runtime_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+                runtime_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+            
+            runtime_client = boto3.client(**runtime_kwargs)
             
             # Claude 모델 요청 형식
             request_body = {
@@ -247,6 +265,8 @@ class BedrockService:
             )
             
             stream = response.get("body")
+            usage_info = None  # usage 정보 저장용
+            
             if stream:
                 for event in stream:
                     if "chunk" in event:
@@ -265,40 +285,99 @@ class BedrockService:
                                 if "text" in delta:
                                     yield {"text": delta["text"]}
                             
+                            # usage 정보 추출 (message_stop 이벤트에서)
+                            if "messageStop" in chunk:
+                                usage = chunk["messageStop"].get("usage", {})
+                                if usage:
+                                    usage_info = {
+                                        "input_tokens": usage.get("inputTokens", 0),
+                                        "output_tokens": usage.get("outputTokens", 0),
+                                        "total_tokens": usage.get("inputTokens", 0) + usage.get("outputTokens", 0)
+                                    }
+                            
                             # 완료 신호
                             if chunk.get("type") == "message_stop" or chunk.get("type") == "content_block_stop":
+                                # usage 정보가 있으면 yield
+                                if usage_info:
+                                    yield {"usage": usage_info}
                                 break
                             
         except Exception as e:
+            error_msg = str(e)
+            # AWS 자격증명 관련 에러 감지
+            if "NoCredentialsError" in str(type(e)) or "Unable to locate credentials" in error_msg:
+                error_msg = "AWS 자격증명을 찾을 수 없습니다. 환경 변수 또는 IAM 역할을 확인하세요."
+            elif "AccessDenied" in error_msg or "UnauthorizedOperation" in error_msg:
+                error_msg = "AWS 권한이 부족합니다. 필요한 권한을 확인하세요."
+            elif "InvalidParameter" in error_msg or "ValidationException" in error_msg:
+                error_msg = f"잘못된 요청 파라미터입니다: {error_msg}"
+            
             yield {
                 "error": {
                     "error": "InvokeModelError",
-                    "message": str(e)
+                    "message": error_msg
                 }
             }
     
-    def _get_allowed_s3_paths(self, group_code: Optional[str] = None) -> List[str]:
+    async def _get_allowed_s3_paths(self, group_code: Optional[str] = None) -> List[str]:
         """
         Group Code에 허용된 S3 경로 목록 반환
         
         Args:
-            group_code: Group Code (G1-G4), None이면 모든 경로 반환
+            group_code: Group Code (예: GRP_IN_ALL, GRP_QLT_QM_RP, GRP_TS_ALL), 필수
         
         Returns:
             허용된 S3 경로 목록 (예: ["사내내규/인사총무/", "사내내규/표준관리/"])
         """
-        if not group_code or group_code not in MOCK_GROUP_CODES:
-            # group_code가 없거나 유효하지 않으면 모든 경로 반환
-            return [kb["s3_path"] for kb in MOCK_KB_DOMAINS.values()]
+        # group_code가 없으면 빈 리스트 반환 (접근 불가)
+        if not group_code:
+            return []
         
-        group_info = MOCK_GROUP_CODES[group_code]
-        allowed_paths = []
-        
-        for kb_code in group_info["kb_domains"]:
-            if kb_code in MOCK_KB_DOMAINS:
-                allowed_paths.append(MOCK_KB_DOMAINS[kb_code]["s3_path"])
-        
-        return allowed_paths
+        if settings.use_mock_data:
+            # Mock 데이터 사용
+            if group_code not in MOCK_GROUP_CODES:
+                return []
+            
+            group_info = MOCK_GROUP_CODES[group_code]
+            allowed_paths = []
+            
+            kb_domains_str = group_info.get("kb_domains", "")
+            if isinstance(kb_domains_str, str):
+                kb_domains_list = [d.strip() for d in kb_domains_str.split(",") if d.strip()]
+            else:
+                kb_domains_list = kb_domains_str if isinstance(kb_domains_str, list) else []
+            
+            for kb_code in kb_domains_list:
+                if kb_code in MOCK_KB_DOMAINS:
+                    allowed_paths.append(MOCK_KB_DOMAINS[kb_code]["s3_path"])
+            
+            return allowed_paths
+        else:
+            # 데이터베이스에서 조회
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                # group_code에 해당하는 kb_domains 조회
+                group_row = await conn.fetchrow(
+                    "SELECT kb_domains FROM group_codes WHERE code = $1",
+                    group_code
+                )
+                
+                if not group_row:
+                    # group_code가 존재하지 않으면 빈 리스트 반환
+                    return []
+                
+                kb_domains_str = group_row['kb_domains']
+                kb_domains_list = [d.strip() for d in kb_domains_str.split(",") if d.strip()] if kb_domains_str else []
+                
+                if not kb_domains_list:
+                    return []
+                
+                # kb_domains에 해당하는 s3_path 조회
+                placeholders = ','.join([f'${i+1}' for i in range(len(kb_domains_list))])
+                query = f"SELECT s3_path FROM kb_domains WHERE code IN ({placeholders})"
+                rows = await conn.fetch(query, *kb_domains_list)
+                
+                return [row['s3_path'] for row in rows]
     
     def _extract_filename_from_s3_uri(self, s3_uri: str) -> str:
         """
@@ -329,7 +408,7 @@ class BedrockService:
         except Exception:
             return s3_uri
     
-    def _extract_kb_domain_from_s3_uri(self, s3_uri: str) -> Optional[str]:
+    async def _extract_kb_domain_from_s3_uri(self, s3_uri: str) -> Optional[str]:
         """
         S3 URI에서 KB Domain 코드 추출
         
@@ -337,7 +416,7 @@ class BedrockService:
             s3_uri: S3 URI (예: "s3://bucket/사내내규/인사총무/doc.pdf")
         
         Returns:
-            KB Domain 코드 (예: "R1") 또는 None
+            KB Domain 코드 (예: "IN_HR", "QLT_SPEC", "TS_OUT") 또는 None
         """
         try:
             # S3 URI 파싱
@@ -345,18 +424,28 @@ class BedrockService:
             # 경로 부분 추출 (예: "/사내내규/인사총무/doc.pdf")
             path = parsed.path.lstrip('/')
             
-            # 각 KB Domain의 s3_path와 매칭
-            for kb_code, kb_info in MOCK_KB_DOMAINS.items():
-                s3_path = kb_info["s3_path"]
-                # 경로가 해당 KB Domain 경로로 시작하는지 확인
-                if path.startswith(s3_path):
-                    return kb_code
+            if settings.use_mock_data:
+                # Mock 데이터 사용
+                for kb_code, kb_info in MOCK_KB_DOMAINS.items():
+                    s3_path = kb_info["s3_path"]
+                    if path.startswith(s3_path):
+                        return kb_code
+            else:
+                # 데이터베이스에서 조회
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT code, s3_path FROM kb_domains ORDER BY code")
+                    
+                    for row in rows:
+                        s3_path = row['s3_path']
+                        if path.startswith(s3_path):
+                            return row['code']
             
             return None
         except Exception:
             return None
     
-    def _filter_retrieval_results(
+    async def _filter_retrieval_results(
         self,
         retrieval_results: List[Dict[str, Any]],
         allowed_s3_paths: List[str]
@@ -372,7 +461,7 @@ class BedrockService:
             {
                 "allowed": [...],  # 권한 있는 결과
                 "blocked": [...],  # 권한 없는 결과
-                "blocked_domains": ["R4", "R5"],  # 차단된 Domain 목록
+                "blocked_domains": ["QLT_SPEC", "QLT_LAW"],  # 차단된 Domain 목록
                 "has_permission_violation": True/False
             }
         """
@@ -393,12 +482,27 @@ class BedrockService:
                 continue
             
             # KB Domain 추출
-            kb_domain = self._extract_kb_domain_from_s3_uri(s3_uri)
+            kb_domain = await self._extract_kb_domain_from_s3_uri(s3_uri)
             
-            if kb_domain and kb_domain in MOCK_KB_DOMAINS:
-                kb_s3_path = MOCK_KB_DOMAINS[kb_domain]["s3_path"]
+            if kb_domain:
+                # KB Domain의 s3_path 조회
+                kb_s3_path = None
+                if settings.use_mock_data:
+                    if kb_domain in MOCK_KB_DOMAINS:
+                        kb_s3_path = MOCK_KB_DOMAINS[kb_domain]["s3_path"]
+                else:
+                    # 데이터베이스에서 조회
+                    pool = await get_pool()
+                    async with pool.acquire() as conn:
+                        kb_row = await conn.fetchrow(
+                            "SELECT s3_path FROM kb_domains WHERE code = $1",
+                            kb_domain
+                        )
+                        if kb_row:
+                            kb_s3_path = kb_row['s3_path']
+                
                 # 허용된 경로인지 확인
-                if kb_s3_path in allowed_s3_paths:
+                if kb_s3_path and kb_s3_path in allowed_s3_paths:
                     allowed_results.append(result)
                 else:
                     blocked_results.append(result)
@@ -418,7 +522,7 @@ class BedrockService:
             "has_permission_violation": len(blocked_results) > 0
         }
     
-    def _generate_permission_message(
+    async def _generate_permission_message(
         self,
         blocked_domains: List[str],
         group_code: Optional[str]
@@ -438,17 +542,52 @@ class BedrockService:
         
         # 차단된 Domain 이름 수집
         blocked_names = []
-        for domain_code in blocked_domains:
-            if domain_code in MOCK_KB_DOMAINS:
-                blocked_names.append(MOCK_KB_DOMAINS[domain_code]["name"])
+        if settings.use_mock_data:
+            for domain_code in blocked_domains:
+                if domain_code in MOCK_KB_DOMAINS:
+                    blocked_names.append(MOCK_KB_DOMAINS[domain_code]["name"])
+        else:
+            # 데이터베이스에서 조회
+            if blocked_domains:
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    placeholders = ','.join([f'${i+1}' for i in range(len(blocked_domains))])
+                    query = f"SELECT code, name FROM kb_domains WHERE code IN ({placeholders})"
+                    rows = await conn.fetch(query, *blocked_domains)
+                    blocked_names = [row['name'] for row in rows]
         
         # Group Code 정보
         group_info = ""
-        if group_code and group_code in MOCK_GROUP_CODES:
-            allowed_domains = MOCK_GROUP_CODES[group_code]["kb_domains"]
-            allowed_names = [MOCK_KB_DOMAINS[d]["name"] for d in allowed_domains if d in MOCK_KB_DOMAINS]
-            group_info = f"\n\n현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
-            group_info += "\n".join([f"- {name}" for name in allowed_names])
+        if group_code:
+            if settings.use_mock_data:
+                if group_code in MOCK_GROUP_CODES:
+                    kb_domains_str = MOCK_GROUP_CODES[group_code].get("kb_domains", "")
+                    if isinstance(kb_domains_str, str):
+                        allowed_domains = [d.strip() for d in kb_domains_str.split(",") if d.strip()]
+                    else:
+                        allowed_domains = kb_domains_str if isinstance(kb_domains_str, list) else []
+                    allowed_names = [MOCK_KB_DOMAINS[d]["name"] for d in allowed_domains if d in MOCK_KB_DOMAINS]
+                    group_info = f"\n\n현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
+                    group_info += "\n".join([f"- {name}" for name in allowed_names])
+            else:
+                # 데이터베이스에서 조회
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    group_row = await conn.fetchrow(
+                        "SELECT kb_domains FROM group_codes WHERE code = $1",
+                        group_code
+                    )
+                    if group_row:
+                        kb_domains_str = group_row['kb_domains']
+                        allowed_domains = [d.strip() for d in kb_domains_str.split(",") if d.strip()] if kb_domains_str else []
+                        
+                        if allowed_domains:
+                            placeholders = ','.join([f'${i+1}' for i in range(len(allowed_domains))])
+                            query = f"SELECT name FROM kb_domains WHERE code IN ({placeholders})"
+                            rows = await conn.fetch(query, *allowed_domains)
+                            allowed_names = [row['name'] for row in rows]
+                            group_info = f"\n\n현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
+                            group_info += "\n".join([f"- {name}" for name in allowed_names])
         
         message = f"\n\n⚠️ 참고: 문의하신 내용 중 일부는 접근 권한이 필요한 영역입니다.\n"
         message += f"다음 영역의 정보는 현재 계정으로 접근할 수 없습니다:\n"
@@ -490,7 +629,7 @@ class BedrockService:
         
         return prompt_instructions
     
-    def _build_filtered_prompt(
+    async def _build_filtered_prompt(
         self,
         query: str,
         context: str,
@@ -525,17 +664,58 @@ class BedrockService:
         # Group Code 정보
         group_info = ""
         allowed_names_str = ""
-        if group_code and group_code in MOCK_GROUP_CODES:
-            allowed_domains = MOCK_GROUP_CODES[group_code]["kb_domains"]
-            allowed_names = [MOCK_KB_DOMAINS[d]["name"] for d in allowed_domains if d in MOCK_KB_DOMAINS]
-            allowed_names_str = ", ".join(allowed_names)
-            group_info = f"\n\n## 접근 권한 정보\n"
-            group_info += f"현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
-            group_info += "\n".join([f"- {name}" for name in allowed_names])
+        if group_code:
+            if settings.use_mock_data:
+                # Mock 데이터 사용
+                if group_code in MOCK_GROUP_CODES:
+                    kb_domains_str = MOCK_GROUP_CODES[group_code].get("kb_domains", "")
+                    if isinstance(kb_domains_str, str):
+                        allowed_domains = [d.strip() for d in kb_domains_str.split(",") if d.strip()]
+                    else:
+                        allowed_domains = kb_domains_str if isinstance(kb_domains_str, list) else []
+                    allowed_names = [MOCK_KB_DOMAINS[d]["name"] for d in allowed_domains if d in MOCK_KB_DOMAINS]
+                    allowed_names_str = ", ".join(allowed_names)
+                    group_info = f"\n\n## 접근 권한 정보\n"
+                    group_info += f"현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
+                    group_info += "\n".join([f"- {name}" for name in allowed_names])
+            else:
+                # 데이터베이스에서 조회
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    group_row = await conn.fetchrow(
+                        "SELECT kb_domains FROM group_codes WHERE code = $1",
+                        group_code
+                    )
+                    if group_row:
+                        kb_domains_str = group_row['kb_domains']
+                        allowed_domains = [d.strip() for d in kb_domains_str.split(",") if d.strip()] if kb_domains_str else []
+                        
+                        if allowed_domains:
+                            placeholders = ','.join([f'${i+1}' for i in range(len(allowed_domains))])
+                            sql_query = f"SELECT name FROM kb_domains WHERE code IN ({placeholders})"
+                            rows = await conn.fetch(sql_query, *allowed_domains)
+                            allowed_names = [row['name'] for row in rows]
+                            allowed_names_str = ", ".join(allowed_names)
+                            group_info = f"\n\n## 접근 권한 정보\n"
+                            group_info += f"현재 계정({group_code})은 다음 영역에만 접근 가능합니다:\n"
+                            group_info += "\n".join([f"- {name}" for name in allowed_names])
         
         # 권한 검증 및 답변 규칙
         permission_validation_rules = ""
-        if permission_note or (group_code and group_code in MOCK_GROUP_CODES):
+        has_group_code = False
+        if group_code:
+            if settings.use_mock_data:
+                has_group_code = group_code in MOCK_GROUP_CODES
+            else:
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    group_row = await conn.fetchrow(
+                        "SELECT code FROM group_codes WHERE code = $1",
+                        group_code
+                    )
+                    has_group_code = group_row is not None
+        
+        if permission_note or has_group_code:
             permission_validation_rules = f"""
 ## ⚠️ 접근 권한 검증 및 답변 규칙 (최우선 - 반드시 준수)
 
@@ -546,9 +726,9 @@ class BedrockService:
 **2단계: 컨텍스트 문서 검증**
 - 제공된 컨텍스트의 각 문서가 위 "접근 권한 정보"에 명시된 허용 영역에 속하는지 확인하세요.
 - 문서 경로, 제목, 내용에서 다음 키워드가 보이면 허용 영역과 대조하세요:
-  * "사내내규", "인사총무", "표준관리", "안전보건" → R1, R2, R3 영역
-  * "품질", "시방서", "규격", "인증법규" → R4, R5, R6 영역
-  * "TS", "기술지원" → R7, R8 영역
+  * "사내내규", "인사총무", "표준관리", "안전보건" → IN_HR, IN_STD, IN_SAFETY 영역
+  * "품질", "시방서", "규격", "인증법규" → QLT_SPEC, QLT_LAW, QLT_STD 영역
+  * "TS", "기술지원" → TS_OUT, TS_IN 영역
 - 허용되지 않은 영역의 문서가 컨텍스트에 포함되어 있으면 → "권한 없음 답변" 템플릿을 사용하세요.
 
 **3단계: 허용된 정보만 사용**
